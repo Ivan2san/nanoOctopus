@@ -205,10 +205,10 @@ forever. Some directions for people who want to build on the idea:
 If you use this in research:
 
 ```bibtex
-@software{nanooctopus2024,
+@software{nanooctopus2026,
   author    = {Sanchez, Ivan},
   title     = {nanoOctopus: Signature-Based Agent Deconfliction},
-  year      = {2024},
+  year      = {2026},
   url       = {https://github.com/Ivan2san/nanoOctopus},
   note      = {Reference implementation of chemical self-recognition
                for multi-agent coordination}
