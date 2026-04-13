@@ -9,7 +9,7 @@ that inhibits grip on the animal's own skin -- no central coordination
 required (Nesher, Levy, Grasso & Hochner, 2014, Current Biology 24(11)).
 
 This code translates that mechanism to multi-agent file coordination:
-  - Each agent carries a SIGNATURE: the set of files it owns.
+  - Each agent carries a SIGNATURE: the set of shared files it owns.
   - Before modifying a file, the agent checks a shared SIGNATURE STORE.
   - If another agent's signature covers that file, the modification is
     reflexively skipped. No orchestrator. No lock manager.
@@ -19,6 +19,7 @@ Run with --no-deconfliction to see the same agents produce file conflicts.
 
 Usage:  python octopus.py                     # with deconfliction
         python octopus.py --no-deconfliction  # without (shows conflicts)
+        python octopus.py --verbose           # show every check
 """
 import argparse, json, os, random, subprocess, sys, threading, time
 from pathlib import Path
@@ -28,8 +29,9 @@ SIGNATURE_FILE = ".agent-signatures.json"
 
 # ANSI colours (stdlib only). Respects https://no-color.org
 _NC = os.environ.get("NO_COLOR")
-G, R, Y, C, B, D, Z = (("",)*7 if _NC else
-    ("\033[32m","\033[31m","\033[33m","\033[36m","\033[1m","\033[2m","\033[0m"))
+RED, GRN, YLW, CYN, BLD, DIM, RST = (("",)*7 if _NC else
+    ("\033[31m", "\033[32m", "\033[33m", "\033[36m",
+     "\033[1m", "\033[2m", "\033[0m"))
 _plock = threading.Lock()
 def _tp(msg):
     with _plock: print(msg)
@@ -41,19 +43,19 @@ def _tp(msg):
 # ---------------------------------------------------------------------------
 TASKS = [
     {"agent_id": "A", "name": "Connection pooling and retry logic",
-     "primary": ["auth/login.py","auth/tokens.py"],
-     "shared": ["shared/database.py","shared/config.py"],
-     "owns": ["shared/database.py","shared/config.py"]},
+     "primary": ["auth/login.py", "auth/tokens.py"],
+     "shared":  ["shared/database.py", "shared/config.py"],
+     "owns":    ["shared/database.py", "shared/config.py"]},
     {"agent_id": "B", "name": "Input sanitisation hardening",
-     "primary": ["users/profile.py","users/permissions.py"],
-     "shared": ["shared/validation.py","shared/database.py"],
-     "owns": ["shared/validation.py"]},
+     "primary": ["users/profile.py", "users/permissions.py"],
+     "shared":  ["shared/validation.py", "shared/database.py"],
+     "owns":    ["shared/validation.py"]},
     {"agent_id": "C", "name": "CSV export format support",
-     "primary": ["reports/generate.py","reports/export.py"],
-     "shared": ["shared/config.py"], "owns": []},
+     "primary": ["reports/generate.py", "reports/export.py"],
+     "shared":  ["shared/config.py"], "owns": []},
     {"agent_id": "D", "name": "Rate limiting for notifications",
-     "primary": ["notifications/email_sender.py","notifications/sms.py"],
-     "shared": ["shared/validation.py"], "owns": []},
+     "primary": ["notifications/email_sender.py", "notifications/sms.py"],
+     "shared":  ["shared/validation.py"], "owns": []},
 ]
 
 # ---------------------------------------------------------------------------
@@ -246,9 +248,12 @@ class Agent:
     def run(self):
         """Execute the agent's task. The arm extends, contacts surfaces,
         grips (modifies) or recoils (skips) based on chemical signal."""
-        active = self.task["primary"] + self.task["owns"]
+        # Signature covers only shared files this agent owns -- contested
+        # territory, not private workspace. The biological analogy is
+        # tighter: the chemical signal marks surfaces where other arms
+        # might also reach, not the arm's own body. (Nesher et al., 2014)
         if self.decon:
-            self.store.register(self.id, active, self.task["name"])
+            self.store.register(self.id, self.task["owns"], self.task["name"])
         time.sleep(self._rng.uniform(0.01, 0.05))  # stagger for interleaving
 
         # Deduplicated file list
@@ -264,12 +269,14 @@ class Agent:
                 if status == "blocked":
                     self.results["skipped"].append(fp)
                     self.results["blocked_by"][fp] = blocker
-                    _tp(f"{R}[Agent {self.id}] BLOCKED {fp} (owned by Agent {blocker}){Z}")
+                    _tp(f"  {RED}\u2717 [Agent {self.id}] Skipped {fp} (blocked by Agent {blocker}){RST}")
                     continue
+                elif self.verbose:
+                    _tp(f"  {DIM}\u2713 [Agent {self.id}] Checked {fp} -- clear{RST}")
             # Real file modification
             if self._modify(fp):
                 self.results["modified"].append(fp)
-                _tp(f"{G}[Agent {self.id}] Modified {fp}{Z}")
+                _tp(f"  {GRN}\u2713 [Agent {self.id}] Modified {fp}{RST}")
             time.sleep(self._rng.uniform(0.01, 0.03))
 
         # Signature persists until the runner releases it after all agents
@@ -293,7 +300,7 @@ class Agent:
             path.write_text(content + mod)
             return True
         except OSError as e:
-            _tp(f"{R}[Agent {self.id}] ERROR {fp}: {e}{Z}"); return False
+            _tp(f"  {RED}\u2717 [Agent {self.id}] ERROR {fp}: {e}{RST}"); return False
 
 # =========================================================================
 #  RUNNER
@@ -302,8 +309,8 @@ def setup_repo(repo_dir):
     """Reset test_repo to baseline via git checkout."""
     git_dir = repo_dir / ".git"
     if not git_dir.exists():
-        for cmd in [["git","init"],["git","add","-A"],
-                    ["git","commit","-m","baseline"],["git","tag","baseline"]]:
+        for cmd in [["git","init"], ["git","add","-A"],
+                    ["git","commit","-m","baseline"], ["git","tag","baseline"]]:
             subprocess.run(cmd, cwd=repo_dir, capture_output=True)
     else:
         subprocess.run(["git","checkout","."], cwd=repo_dir, capture_output=True)
@@ -317,7 +324,10 @@ def run_experiment(tasks, repo_dir, decon, seed, verbose):
     store = SignatureStore(repo_dir)
     agents = [Agent(t, store, repo_dir, decon, seed, verbose) for t in tasks]
     mode = "DECONFLICTION ON" if decon else "DECONFLICTION OFF"
-    print(f"\n{B}{'='*55}\n  nanoOctopus -- {mode}\n  Agents: {len(agents)}  |  Seed: {seed}\n{'='*55}{Z}\n")
+    print(f"\n{BLD}{'='*55}")
+    print(f"  nanoOctopus -- {mode}")
+    print(f"  Agents: {len(agents)}  |  Seed: {seed}")
+    print(f"{'='*55}{RST}\n")
     threads = [threading.Thread(target=a.run, name=f"Agent-{a.id}") for a in agents]
     for t in threads: t.start()
     for t in threads: t.join()
@@ -333,11 +343,9 @@ def detect_conflicts(repo_dir, tasks, all_results):
     """Check for modifications that were attempted but lost to overwrites.
     Only flags files an agent actually wrote (not files it was blocked from)."""
     conflicts = []
-    # Build set of files each agent actually modified (not skipped)
     written = set()
     for r in all_results:
-        for fp in r["modified"]:
-            written.add((r["agent"], fp))
+        for fp in r["modified"]: written.add((r["agent"], fp))
     shared = set()
     for t in tasks:
         for f in t["shared"]: shared.add(f)
@@ -358,29 +366,41 @@ def display_results(results, log, decon, repo_dir, tasks):
     """Print experiment summary."""
     modified = sum(len(r["modified"]) for r in results)
     skipped = sum(len(r["skipped"]) for r in results)
+    total_possible = sum(1 for t in tasks for f in (t["primary"] + t["shared"])
+                         if (t["agent_id"], f) in MODS)
+    completeness = int(modified / total_possible * 100) if total_possible else 0
     conflicts = detect_conflicts(repo_dir, tasks, results)
-    print(f"\n{B}{'='*55}\n  RESULTS\n{'='*55}{Z}")
+
+    print(f"\n{BLD}{'='*55}")
+    print(f"  RESULTS")
+    print(f"{'='*55}{RST}")
     mode = "Signature-based deconfliction" if decon else "No deconfliction (free-for-all)"
     print(f"  Mode:              {mode}")
     print(f"  Agents:            {len(results)}")
     print(f"  Files modified:    {modified}")
     print(f"  Files skipped:     {skipped}{' (deconfliction)' if skipped else ''}")
-    c_str = f"{R}{len(conflicts)}{Z}" if conflicts else f"{G}0{Z}"
+    c_str = f"{RED}{len(conflicts)}{RST}" if conflicts else f"{GRN}0{RST}"
     print(f"  Conflicts:         {c_str}")
     print(f"  Coordinator msgs:  0")
+    print(f"  Task completeness: {completeness}%")
+
     if conflicts:
-        print(f"\n  {R}Conflicting files (modifications lost):{Z}")
+        print(f"\n  {RED}Conflicting files (modifications lost):{RST}")
         for fp, aid in conflicts:
             print(f"    {fp} -- Agent {aid}'s changes overwritten")
     if skipped:
-        print(f"\n  {Y}Deconfliction events:{Z}")
+        print(f"\n  {YLW}Deconfliction events:{RST}")
         for r in results:
             for fp in r["skipped"]:
-                print(f"    Agent {r['agent']} skipped {fp} (owned by Agent {r['blocked_by'].get(fp,'?')})")
-    hint = "Run without --no-deconfliction to see the signature mechanism." if not decon \
-        else "Run with --no-deconfliction to compare."
-    print(f"\n  {D}{hint}{Z}")
-    print(f"{B}{'='*55}{Z}\n")
+                blocker = r["blocked_by"].get(fp, "?")
+                print(f"    Agent {r['agent']} skipped {fp} "
+                      f"(owned by Agent {blocker})")
+
+    if decon:
+        print(f"\n  {DIM}Run again with --no-deconfliction to compare.{RST}")
+    else:
+        print(f"\n  {DIM}Run again without any flags to see the signature mechanism.{RST}")
+    print(f"{BLD}{'='*55}{RST}\n")
 
 # =========================================================================
 #  MAIN
@@ -390,12 +410,12 @@ def main():
         description="nanoOctopus: octopus-inspired signature-based agent deconfliction")
     p.add_argument("--no-deconfliction", action="store_true",
                    help="disable signature checking (agents write freely, conflicts likely)")
-    p.add_argument("--agents", type=int, default=4, choices=range(1,5), metavar="N",
+    p.add_argument("--agents", type=int, default=4, choices=range(1, 5), metavar="N",
                    help="number of concurrent agents, 1-4 (default: 4)")
     p.add_argument("--seed", type=int, default=42,
                    help="random seed for reproducible runs (default: 42)")
     p.add_argument("--verbose", action="store_true",
-                   help="print detailed per-file deconfliction checks")
+                   help="print every deconfliction check, not just blocks")
     args = p.parse_args()
     decon = not args.no_deconfliction
     res, log = run_experiment(TASKS[:args.agents], REPO_DIR, decon, args.seed, args.verbose)
